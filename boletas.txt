@@ -1,0 +1,505 @@
+// ==========================================
+// GESTOR AUTOMÁTICO DE FACTURAS - VERSIÓN DISTRIBUCIÓN MASIVA
+// ==========================================
+const CONFIG = {
+  MODELO_PRIMARIO: 'gemini-3.1-flash-lite',
+  MODELO_FALLBACK: 'gemini-3.8-flash',
+  CONFIANZA_MINIMA: 70,
+  TIMEOUT_SEGUNDOS: 90
+};
+
+// 1. MENÚ (Solo 2 opciones)
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('⚙️ Facturas')
+      .addItem('1. Instalar Sistema', 'instalarSistema')
+      .addItem('2. Configurar API Keys', 'mostrarSidebar')
+      .addToUi();
+}
+
+// 2. INSTALADOR (Carpetas, PDF con tablas y Excel)
+function instalarSistema() {
+  Logger.log('--- INICIANDO INSTALACIÓN ---');
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const props = PropertiesService.getScriptProperties();
+  
+  props.deleteProperty('ENTRADA_ID');
+  props.deleteProperty('PLANTILLA_ID');
+
+  try {
+    Logger.log('Creando estructura de carpetas en Drive...');
+    const raiz = DriveApp.createFolder('Facturas y Boletas Perú');
+    const entrada = raiz.createFolder('01 Entrada');
+    const procesados = raiz.createFolder('02 Procesados');
+    const revisar = raiz.createFolder('03 Revisar');
+    const plantillas = raiz.createFolder('04 Plantillas');
+    
+    props.setProperty('ENTRADA_ID', entrada.getId());
+    props.setProperty('PROCESADOS_ID', procesados.getId());
+    props.setProperty('REVISAR_ID', revisar.getId());
+    props.setProperty('SHEET_ID', ss.getId());
+    
+    Logger.log('Creando plantilla PDF profesional...');
+    const doc = DocumentApp.create('Plantilla PDF Oficial');
+    const body = doc.getBody();
+    body.setMarginTop(30).setMarginBottom(30).setMarginLeft(40).setMarginRight(40);
+    
+    const titulo = body.insertParagraph(0, 'COMPROBANTE DE PAGO ELECTRÓNICO');
+    titulo.setAlignment(DocumentApp.HorizontalAlignment.CENTER).setFontFamily('Arial').setFontSize(20).setBold(true).setForegroundColor('#1a365d');
+    body.appendHorizontalRule();
+    
+    const proveedor = body.appendParagraph('{{proveedor}}'); 
+    proveedor.setFontFamily('Arial').setFontSize(14).setBold(true).setForegroundColor('#333333');
+    
+    const ruc = body.appendParagraph('RUC: {{ruc}}'); 
+    ruc.setFontFamily('Arial').setFontSize(10).setForegroundColor('#666666').setSpacingAfter(20);
+    
+    // Tabla de Datos (Sintaxis 100% nativa y segura)
+    const tablaDatos = body.appendTable();
+    const f1 = tablaDatos.appendTableRow(); 
+    f1.appendTableCell('Tipo de Documento').setBackgroundColor('#f3f4f6').setBold(true).setFontFamily('Arial').setFontSize(10); 
+    f1.appendTableCell('{{tipo_comprobante}}').setFontFamily('Arial').setFontSize(10);
+    
+    const f2 = tablaDatos.appendTableRow(); 
+    f2.appendTableCell('Número').setBackgroundColor('#f3f4f6').setBold(true).setFontFamily('Arial').setFontSize(10); 
+    f2.appendTableCell('{{nro_documento}}').setFontFamily('Arial').setFontSize(10);
+    
+    const f3 = tablaDatos.appendTableRow(); 
+    f3.appendTableCell('Fecha de Emisión').setBackgroundColor('#f3f4f6').setBold(true).setFontFamily('Arial').setFontSize(10); 
+    f3.appendTableCell('{{fecha}}').setFontFamily('Arial').setFontSize(10);
+    
+    body.appendParagraph('').setSpacingAfter(20);
+    
+    // Tabla del Total
+    const tablaTotal = body.appendTable();
+    const fTotal = tablaTotal.appendTableRow();
+    fTotal.appendTableCell('TOTAL A PAGAR').setBackgroundColor('#e0f2fe').setBold(true).setFontFamily('Arial').setFontSize(12).setForegroundColor('#1a365d');
+    fTotal.appendTableCell('{{total}}').setBackgroundColor('#e0f2fe').setBold(true).setFontFamily('Arial').setFontSize(16).setForegroundColor('#1a365d');
+    
+    body.appendParagraph('').setSpacingAfter(20);
+    const pie = body.appendParagraph('Generado automáticamente por Facturas y Boletas Perú.');
+    pie.setFontFamily('Arial').setFontSize(8).setForegroundColor('#888888').setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+    doc.saveAndClose();
+    
+    DriveApp.getFileById(doc.getId()).moveTo(plantillas);
+    props.setProperty('PLANTILLA_ID', doc.getId());
+
+    crearHojasExcel(ss);
+    
+    Logger.log('Configurando activador automático (cada 15 min)...');
+    const triggers = ScriptApp.getProjectTriggers();
+    for (let i = 0; i < triggers.length; i++) {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+    ScriptApp.newTrigger('procesarFacturasNuevas').timeBased().everyMinutes(15).create();
+
+    Logger.log('✅ INSTALACIÓN COMPLETADA.');
+    SpreadsheetApp.getUi().alert('✅ ¡Sistema instalado con éxito!\n\nEl robot automático ya está activo. Solo sube tus fotos a la carpeta "01 Entrada".');
+  } catch (e) {
+    Logger.log('❌ ERROR EN INSTALACIÓN: ' + e.message);
+    SpreadsheetApp.getUi().alert('❌ Error al instalar: ' + e.message);
+  }
+}
+
+// 3. VENTANA DE API KEYS
+function mostrarSidebar() {
+  const html = `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <base target="_top">
+        <style>
+          body { font-family: 'Segoe UI', Arial, sans-serif; padding: 15px; color: #333; }
+          h3 { color: #1a73e8; margin-top: 0; font-size: 18px; }
+          label { font-weight: bold; font-size: 12px; display: block; margin-top: 15px; }
+          input { width: 100%; padding: 10px; margin: 5px 0; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+          .help { font-size: 11px; color: #666; margin-top: 2px; margin-bottom: 10px; }
+          a { color: #1a73e8; text-decoration: none; }
+          button { width: 100%; padding: 12px; background-color: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; margin-top: 15px; font-size: 14px; }
+          button:hover { background-color: #1557b0; }
+          #mensaje { margin-top: 15px; font-size: 13px; text-align: center; font-weight: bold; }
+        </style>
+      </head>
+      <body>
+        <h3>Configuración de API Keys</h3>
+        <label>1. API Key de Gemini (IA)</label>
+        <input type="password" id="geminiKey" placeholder="Empieza con AIza...">
+        <div class="help">Consíguela en <a href="https://aistudio.google.com/app/apikey" target="_blank">Google AI Studio</a></div>
+        <label>2. Token de ApiPerú</label>
+        <input type="password" id="apiperuKey" placeholder="Tu token de ApiPerú">
+        <div class="help">Regístrate en <a href="https://apiperu.dev" target="_blank">ApiPerú.dev</a></div>
+        <button onclick="guardar()">Guardar y Activar</button>
+        <div id="mensaje"></div>
+        <script>
+          function guardar() {
+            const g = document.getElementById('geminiKey').value;
+            const a = document.getElementById('apiperuKey').value;
+            const msg = document.getElementById('mensaje');
+            if (!g || !a) { msg.style.color = "red"; msg.innerHTML = "Llena ambos campos."; return; }
+            msg.style.color = "#1a73e8"; msg.innerHTML = "Guardando...";
+            google.script.run.withSuccessHandler(function() {
+              msg.style.color = "green"; msg.innerHTML = "✅ ¡Guardado con éxito!";
+              setTimeout(() => google.script.host.close(), 1500);
+            }).guardarClaves(g, a);
+          }
+        </script>
+      </body>
+    </html>
+  `;
+  SpreadsheetApp.getUi().showSidebar(HtmlService.createHtmlOutput(html).setTitle('API Keys'));
+}
+
+function guardarClaves(g, a) {
+  const props = PropertiesService.getScriptProperties();
+  if (g) props.setProperty('GEMINI_API_KEY', g);
+  if (a) props.setProperty('APIPERU_TOKEN', a);
+  Logger.log('API Keys guardadas en el sistema.');
+}
+
+// 4. NORMALIZADOR DE FECHAS INTELIGENTE
+function normalizarFecha(fechaStr) {
+  if (!fechaStr) return '';
+  let str = String(fechaStr).trim().replace(/[\/.]/g, '-');
+  const partes = str.split('-');
+  
+  if (partes.length !== 3) return str; 
+
+  let dia, mes, anio;
+
+  if (partes[0].length === 4) {
+    anio = partes[0];
+    mes = partes[1].padStart(2, '0');
+    dia = partes[2].padStart(2, '0');
+  } else if (partes[2].length === 4) {
+    dia = partes[0].padStart(2, '0');
+    mes = partes[1].padStart(2, '0');
+    anio = partes[2];
+  } else if (partes[2].length === 2) {
+    dia = partes[0].padStart(2, '0');
+    mes = partes[1].padStart(2, '0');
+    anio = '20' + partes[2]; 
+  } else {
+    return str; 
+  }
+
+  const fechaFinal = `${dia}-${mes}-${anio}`;
+  Logger.log(`[Fechas] Fecha original "${fechaStr}" normalizada a "${fechaFinal}"`);
+  return fechaFinal;
+}
+
+// 5. PROCESAMIENTO AUTOMÁTICO
+function procesarFacturasNuevas() {
+  Logger.log('========================================');
+  Logger.log('--- INICIO DE EJECUCIÓN AUTOMÁTICA ---');
+  Logger.log('========================================');
+  
+  const props = PropertiesService.getScriptProperties();
+  const ENTRADA_ID = props.getProperty('ENTRADA_ID');
+  const SHEET_ID = props.getProperty('SHEET_ID');
+  
+  if (!ENTRADA_ID || !SHEET_ID) {
+    Logger.log('Sistema no instalado. Abortando ejecución.');
+    return;
+  }
+
+  const PROCESADOS_ID = props.getProperty('PROCESADOS_ID');
+  const PLANTILLA_ID = props.getProperty('PLANTILLA_ID');
+  const REVISAR_ID = props.getProperty('REVISAR_ID');
+  
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  crearHojasExcel(ss);
+
+  const carpeta = DriveApp.getFolderById(ENTRADA_ID);
+  const archivos = carpeta.getFiles();
+  
+  let procesados = 0;
+
+  while (archivos.hasNext()) {
+    const archivo = archivos.next();
+    if (yaFueProcesado(archivo.getId(), ss)) {
+      Logger.log(`-> OMITIDO: El archivo ${archivo.getName()} ya fue procesado antes.`);
+      continue;
+    }
+
+    try {
+      Logger.log('--------------------------------------------------');
+      Logger.log(`[Analizando] ${archivo.getName()}`);
+      procesarUnArchivo(archivo, ss, PROCESADOS_ID, REVISAR_ID, PLANTILLA_ID);
+      procesados++;
+      Logger.log(`✅ ÉXITO: ${archivo.getName()} procesado.`);
+    } catch (e) {
+      Logger.log(`❌ ERROR CRÍTICO en ${archivo.getName()}: ${e.message}`);
+      moverARevisar(archivo, e.message, ss, REVISAR_ID);
+    }
+  }
+  
+  Logger.log('========================================');
+  Logger.log(`--- FIN DE EJECUCIÓN. Total procesados: ${procesados} ---`);
+  Logger.log('========================================');
+}
+
+function crearHojasExcel(ss) {
+  if (!ss.getSheetByName('Registro_Facturas')) {
+    Logger.log('[Excel] Creando hoja "Registro_Facturas"...');
+    const sheet = ss.insertSheet('Registro_Facturas');
+    sheet.appendRow(['ID_Archivo', 'Fecha_Proceso', 'Nro_Factura', 'Nro_Boleta', 'Proveedor', 'RUC', 'Fecha_Emision', 'Base', 'IGV', 'Total', 'Moneda', 'Observacion', 'Enlace_Archivo', 'Estado', 'Enlace_PDF']);
+    sheet.getRange('A1:O1').setBackground('#1a365d').setFontColor('#ffffff').setFontWeight('bold');
+    sheet.getRange('B:B').setNumberFormat('@'); // Forzar texto para fecha proceso
+    sheet.getRange('G:G').setNumberFormat('@'); // Forzar texto para fecha emision
+  }
+  if (!ss.getSheetByName('Observaciones')) {
+    Logger.log('[Excel] Creando hoja "Observaciones"...');
+    ss.insertSheet('Observaciones').appendRow(['ID_Archivo', 'Nro_Comprobante', 'Observacion', 'Fecha']);
+  }
+}
+
+function yaFueProcesado(idArchivo, ss) {
+  const sheet = ss.getSheetByName('Registro_Facturas');
+  if (!sheet) return false;
+  const datos = sheet.getDataRange().getValues();
+  for (let i = 1; i < datos.length; i++) {
+    if (datos[i][0] === idArchivo) return true;
+  }
+  return false;
+}
+
+function procesarUnArchivo(archivo, ss, PROCESADOS_ID, REVISAR_ID, PLANTILLA_ID) {
+  const idOriginal = archivo.getId();
+  let nombre = archivo.getName();
+  let mime = archivo.getMimeType();
+  const ext = nombre.split('.').pop().toLowerCase();
+  let blob, datos = null, fuenteDatos = '';
+  let alertas = []; 
+
+  Logger.log(`[Tipo de archivo] MIME: ${mime} | Ext: ${ext}`);
+
+  if (ext === 'xml' || mime.includes('xml')) {
+    Logger.log('-> Ruta: Extrayendo datos del XML...');
+    datos = extraerDeXML(archivo); fuenteDatos = 'XML'; blob = archivo.getBlob();
+    if (!datos) throw new Error('XML inválido o no es UBL 2.1');
+    Logger.log('-> XML parseado correctamente.');
+  } 
+  else if (mime.includes('image') || mime.includes('pdf') || ext === 'heic' || ext === 'heif') {
+    if (ext === 'heic' || ext === 'heif') {
+      Logger.log('-> Convirtiendo imagen HEIC a JPEG...');
+      blob = convertirHeicAJpeg(archivo); nombre = nombre.replace(/\.[^/.]+$/, '') + '.jpg';
+    } else { 
+      blob = archivo.getBlob(); 
+    }
+
+    if (!mime.includes('pdf')) {
+      Logger.log('-> Capa 1: Intentando leer código QR...');
+      const qrString = leerQR(blob);
+      if (qrString) { 
+        datos = parsearQR(qrString); 
+        if (datos) {
+          fuenteDatos = 'QR'; 
+          Logger.log('-> QR leído con éxito.');
+        }
+      } else {
+        Logger.log('-> No se detectó QR legible.');
+      }
+    }
+
+    if (!datos) {
+      Logger.log('-> Capa 2: Enviando documento a Gemini...');
+      datos = extraerConGemini(blob, mime); 
+      fuenteDatos = 'Gemini';
+      Logger.log('-> Respuesta de Gemini: ' + JSON.stringify(datos));
+
+      if (Array.isArray(datos) && datos.length > 0) {
+        datos = datos[0];
+        Logger.log('-> Nota: Gemini devolvió un Array, se extrajo el primer objeto.');
+      }
+
+      if (datos && datos.es_factura_boleta === false) throw new Error('El documento no es una factura ni boleta.');
+      
+      if (!datos.base || datos.base === null) {
+        alertas.push('Base no visible');
+        Logger.log('-> Alerta: No se encontró la Base imponible.');
+      }
+      if (!datos.igv || datos.igv === null) {
+        alertas.push('IGV no visible');
+        Logger.log('-> Alerta: No se encontró el IGV.');
+      }
+    }
+  } else { 
+    throw new Error('Formato de archivo no soportado'); 
+  }
+
+  // Normalizar Fecha
+  datos.fecha_emision = normalizarFecha(datos.fecha_emision);
+
+  // Validaciones
+  if (datos.ruc && datos.ruc.length !== 11) {
+    alertas.push('RUC inválido');
+    Logger.log('-> Alerta: El RUC no tiene 11 dígitos.');
+  }
+  
+  if (datos.ruc && !datos.proveedor) {
+    Logger.log(`-> Consultando razón social para RUC ${datos.ruc}...`);
+    datos.proveedor = obtenerRazonSocial(datos.ruc) || '';
+    if(datos.proveedor) Logger.log(`-> Proveedor encontrado: ${datos.proveedor}`);
+  }
+
+  Logger.log('-> Archivando archivo original en Drive...');
+  blob.setName(nombre);
+  const ruta = archivarArchivo(blob, datos.fecha_emision, PROCESADOS_ID);
+  Logger.log(`-> Guardado en: ${ruta.carpeta}`);
+
+  Logger.log('-> Generando PDF oficial...');
+  const urlPdf = generarPDF(datos, ruta, PLANTILLA_ID, PROCESADOS_ID);
+  if (urlPdf) Logger.log('-> PDF generado correctamente.');
+  else Logger.log('-> ⚠️ Alerta: No se pudo generar el PDF.');
+
+  Logger.log('-> Escribiendo datos en Google Sheets...');
+  escribirExcel(idOriginal, datos, ruta, `Procesado (${fuenteDatos})`, urlPdf, alertas, ss);
+  
+  archivo.moveTo(DriveApp.getFolderById(PROCESADOS_ID));
+  Logger.log('-> Archivo original movido a "02 Procesados".');
+}
+
+// 6. GEMINI CON FALLBACK
+function extraerConGemini(blob, mime) {
+  const key = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if(!key) throw new Error("Falta GEMINI_API_KEY en configuraciones.");
+  
+  const b64 = Utilities.base64Encode(blob.getBytes());
+  const payload = { contents: [{ parts: [ { text: "Extrae JSON: tipo_comprobante, nro_factura, nro_boleta, proveedor, ruc, fecha_emision, base, igv, total, moneda, confianza. Si falta base/igv usa null." }, { inline_data: { mime_type: mime.includes('pdf')?'application/pdf':'image/jpeg', data: b64 } } ] }], generationConfig: { response_mime_type: 'application/json' } };
+  
+  const modelos = [CONFIG.MODELO_PRIMARIO, CONFIG.MODELO_FALLBACK];
+  let err = null;
+  for (const mod of modelos) {
+    try {
+      Logger.log(`[Gemini] Llamando a modelo: ${mod}...`);
+      const res = UrlFetchApp.fetch(`https://generativelanguage.googleapis.com/v1beta/models/${mod}:generateContent?key=${key}`, { method:'post', contentType:'application/json', payload:JSON.stringify(payload), muteHttpExceptions:true, timeoutSeconds: CONFIG.TIMEOUT_SEGUNDOS });
+      if (res.getResponseCode() === 200) {
+        Logger.log(`[Gemini] ${mod} respondió 200 OK.`);
+        return JSON.parse(JSON.parse(res.getContentText()).candidates[0].content.parts[0].text);
+      }
+      err = res.getResponseCode();
+      Logger.log(`[Gemini] ${mod} falló con HTTP ${err}. Saltando al fallback...`);
+    } catch (e) { 
+      err = e.message; 
+      Logger.log(`[Gemini] Excepción con ${mod}: ${err}`);
+    }
+  }
+  throw new Error('Todos los modelos de Gemini fallaron: ' + err);
+}
+
+// 7. AUXILIARES
+function leerQR(blob) {
+  try {
+    const res = UrlFetchApp.fetch('https://useqr.app/api/v1/decode', { method: 'post', payload: { file: blob }, muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) return null;
+    const json = JSON.parse(res.getContentText()); 
+    return (json.count > 0 && json.codes[0].text.includes('|')) ? json.codes[0].text.trim() : null;
+  } catch (e) { 
+    Logger.log('[QR] Error al leer QR: ' + e.message);
+    return null; 
+  }
+}
+
+function parsearQR(str) {
+  const p = str.split('|'); if (p.length < 8) return null;
+  return { ruc: p[0], tipo_comprobante: p[1] === '01' ? 'factura' : 'boleta', nro_factura: p[1] === '01' ? `${p[2]}-${p[3]}` : '', nro_boleta: p[1] === '03' ? `${p[2]}-${p[3]}` : '', igv: p[4], total: p[5], fecha_emision: p[6], base: (parseFloat(p[5]) - parseFloat(p[4])).toFixed(2), proveedor: '', confianza: 100 };
+}
+
+function extraerDeXML(archivo) {
+  try {
+    const xml = archivo.getBlob().getDataAsString();
+    const get = (tag) => { const m = xml.match(new RegExp(`<cbc:${tag}[^>]*>(.*?)</cbc:${tag}>`, 's')); return m ? m[1].replace(/<!\[CDATA\[|\]\]>/g, '').trim() : ''; };
+    let ruc = ''; const sup = xml.match(/<cac:AccountingSupplierParty>([\s\S]*?)<\/cac:AccountingSupplierParty>/);
+    if (sup) { const r = sup[1].match(/<cbc:ID[^>]*>(.*?)<\/cbc:ID>/); if (r) ruc = r[1].replace(/<!\[CDATA\[|\]\]>/g, '').trim(); }
+    const tipo = get('InvoiceTypeCode'), num = get('ID'), fRaw = get('IssueDate');
+    return { tipo_comprobante: tipo === '01' ? 'factura' : 'boleta', nro_factura: tipo === '01' ? num : '', nro_boleta: tipo === '03' ? num : '', fecha_emision: fRaw, ruc: ruc, proveedor: get('RegistrationName'), base: get('LineExtensionAmount'), igv: get('TaxAmount'), total: get('TaxInclusiveAmount'), confianza: 100 };
+  } catch (e) { 
+    Logger.log('[XML] Error extrayendo XML: ' + e.message);
+    return null; 
+  }
+}
+
+function obtenerRazonSocial(ruc) {
+  const token = PropertiesService.getScriptProperties().getProperty('APIPERU_TOKEN');
+  if (!token) return null;
+  const res = UrlFetchApp.fetch('https://apiperu.dev/api/ruc', { method: 'post', headers: { 'Authorization': `Bearer ${token}` }, payload: JSON.stringify({ ruc: ruc }), contentType: 'application/json', muteHttpExceptions: true });
+  if (res.getResponseCode() === 200) return JSON.parse(res.getContentText()).data?.nombre_o_razon_social || null;
+  return null;
+}
+
+function convertirHeicAJpeg(archivo) {
+  Logger.log('[HEIC] Convirtiendo archivo usando miniatura de Drive...');
+  const response = UrlFetchApp.fetch(`https://drive.google.com/thumbnail?id=${archivo.getId()}&sz=w2000`, { headers: { authorization: 'Bearer ' + ScriptApp.getOAuthToken() } });
+  let blobJpeg = response.getBlob(); blobJpeg.setName(archivo.getName().replace(/\.[^/.]+$/, '') + '.jpg'); return blobJpeg;
+}
+
+function archivarArchivo(blob, fechaStr, PROCESADOS_ID) {
+  let f = new Date(); 
+  if (fechaStr && /^\d{2}-\d{2}-\d{4}$/.test(fechaStr)) { 
+    const p = fechaStr.split('-'); 
+    f = new Date(`${p[2]}-${p[1]}-${p[0]}`); 
+  }
+  const a = f.getFullYear().toString(), m = String(f.getMonth()+1).padStart(2,'0');
+  const nMes = new Intl.DateTimeFormat('es-PE',{month:'long'}).format(f);
+  const cMes = `${m}-${nMes.charAt(0).toUpperCase()+nMes.slice(1)}`;
+  const raiz = DriveApp.getFolderById(PROCESADOS_ID);
+  const cA = raiz.getFoldersByName(a).hasNext()?raiz.getFoldersByName(a).next():raiz.createFolder(a);
+  const cM = cA.getFoldersByName(cMes).hasNext()?cA.getFoldersByName(cMes).next():cA.createFolder(cMes);
+  return { carpeta: `${a}/${cMes}`, url: cM.createFile(blob).getUrl() };
+}
+
+function generarPDF(datos, ruta, PLANTILLA_ID, PROCESADOS_ID) {
+  try {
+    const t = DriveApp.getFileById(PLANTILLA_ID).makeCopy('Temp');
+    const d = DocumentApp.openById(t.getId()); const b = d.getBody();
+    const tipo = (datos.tipo_comprobante || 'DOCUMENTO').toUpperCase();
+    const nro = datos.nro_factura || datos.nro_boleta || 'S/N';
+    
+    b.replaceText('{{tipo_comprobante}}', tipo);
+    b.replaceText('{{nro_documento}}', nro);
+    b.replaceText('{{proveedor}}', datos.proveedor || 'PROVEEDOR DESCONOCIDO');
+    b.replaceText('{{ruc}}', datos.ruc || '00000000000');
+    b.replaceText('{{fecha}}', datos.fecha_emision || 'SIN FECHA');
+    b.replaceText('{{total}}', datos.total || '0.00');
+    d.saveAndClose();
+    
+    const pdf = t.getAs('application/pdf'); pdf.setName(`PDF_${nro}.pdf`);
+    const cA = DriveApp.getFolderById(PROCESADOS_ID).getFoldersByName(ruta.carpeta.split('/')[0]).next();
+    const cM = cA.getFoldersByName(ruta.carpeta.split('/')[1]).next();
+    const archivoFinal = cM.createFile(pdf); t.setTrashed(true);
+    return archivoFinal.getUrl();
+  } catch (e) { 
+    Logger.log('[PDF] Error generando PDF: ' + e.message);
+    return ''; 
+  }
+}
+
+function escribirExcel(id, datos, ruta, estado, urlPdf, alertas, ss) {
+  const sheet = ss.getSheetByName('Registro_Facturas');
+  let obs = datos.observacion || ''; 
+  if (alertas.length > 0) obs += ' ⚠️ ' + alertas.join('. ');
+  
+  const fila = sheet.getLastRow() + 1;
+  const fechaProcesoStr = Utilities.formatDate(new Date(), "America/Lima", "dd-MM-yyyy");
+  
+  sheet.getRange(fila, 1, 1, 15).setValues([[id, fechaProcesoStr, datos.nro_factura || '', datos.nro_boleta || '', datos.proveedor || '', datos.ruc || '', datos.fecha_emision || '', datos.base || '', datos.igv || '', datos.total || '', datos.moneda || 'PEN', obs.trim(), ruta.url, estado, urlPdf || '']]);
+  
+  if (!datos.base) sheet.getRange(fila, 8).setBackground('#FFD966').setFontColor('#000000');
+  if (!datos.igv) sheet.getRange(fila, 9).setBackground('#FFD966').setFontColor('#000000');
+  
+  if (obs.trim() !== '' && datos.observacion !== 'Extraído de XML') {
+    const sheetObs = ss.getSheetByName('Observaciones');
+    if (sheetObs) sheetObs.appendRow([id, datos.nro_factura || datos.nro_boleta, obs, fechaProcesoStr]);
+  }
+}
+
+function moverARevisar(archivo, motivo, ss, REVISAR_ID) {
+  try { archivo.moveTo(DriveApp.getFolderById(REVISAR_ID)); } catch(e) {}
+  const sheet = ss.getSheetByName('Registro_Facturas');
+  if (sheet) {
+    const fila = sheet.getLastRow() + 1;
+    const fechaProcesoStr = Utilities.formatDate(new Date(), "America/Lima", "dd-mm-yyyy");
+    sheet.getRange(fila, 1, 1, 15).setValues([[archivo.getId(), fechaProcesoStr, '', '', '', '', '', '', '', '', '', 'Revisar: ' + motivo, '', 'Revisar', '']]);
+    sheet.getRange(fila, 1, 1, 15).setBackground('#F4CCCC'); 
+  }
+}
