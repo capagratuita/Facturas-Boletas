@@ -1,0 +1,12 @@
+Ver, editar y borrar todos tus archivos de Google Drive
+
+Esta app requiere permiso para acceder a todo tu contenido en Google Drive para realizar las mismas tareas que tú realizas, incluidas las siguientes:
+Ver tus archivos
+Subir y descargar tus archivos
+Borrar tus archivos
+Ver los nombres y correos electrónicos de las personas con quienes compartes tus archivos
+Compartir y dejar de compartir tus archivos con otras personas
+Quitar personas de tus archivos
+Organizar tus archivos en Drive
+
+Es posible que tengas información sensible en Google Drive, como registros financieros, informes médicos, fotos o datos fiscales.
