@@ -1,5 +1,5 @@
 // ==========================================
-// GESTOR AUTOMÁTICO DE FACTURAS - VERSIÓN FINAL SIN DUPLICADOS
+// GESTOR AUTOMÁTICO DE FACTURAS - VERSIÓN FINAL (CON HORA)
 // ==========================================
 const CONFIG = {
   MODELO_PRIMARIO: 'gemini-3.1-flash-lite',
@@ -21,7 +21,7 @@ function instalarSistema() {
   const props = PropertiesService.getScriptProperties();
   
   if (props.getProperty('ENTRADA_ID')) {
-    SpreadsheetApp.getUi().alert('El sistema ya está instalado en este Excel. Por favor, ve al paso 2 para configurar tus API Keys.');
+    SpreadsheetApp.getUi().alert('El sistema ya está instalado. Ve al paso 2 para configurar tus API Keys.');
     return;
   }
 
@@ -52,7 +52,7 @@ function instalarSistema() {
     }
     ScriptApp.newTrigger('procesarFacturasNuevas').timeBased().everyMinutes(15).create();
 
-    SpreadsheetApp.getUi().alert('✅ ¡Carpetas creadas con éxito!\n\n⚠️ PASO IMPORTANTE:\nEl robot aún no puede leer facturas. Ahora debes ir al menú "⚙️ Facturas" > "2. Configurar API Keys" para activarlo.');
+    SpreadsheetApp.getUi().alert('✅ ¡Carpetas creadas con éxito!\n\n⚠️ PASO IMPORTANTE:\nEl robot aún no puede leer facturas. Ve al menú "⚙️ Facturas" > "2. Configurar API Keys".');
   } catch (e) {
     SpreadsheetApp.getUi().alert('❌ Error al instalar: ' + e.message);
   }
@@ -130,7 +130,7 @@ function guardarClaves(g, a) {
 }
 
 function mostrarMensajeExitoFinal() {
-  SpreadsheetApp.getUi().alert('🚀 ¡Robot activado con éxito!\n\nYa puedes subir tus fotos, PDFs o XMLs a la carpeta "01 Entrada". El sistema las procesará automáticamente.');
+  SpreadsheetApp.getUi().alert('🚀 ¡Robot activado con éxito!\n\nYa puedes subir tus fotos, PDFs o XMLs a la carpeta "01 Entrada".');
 }
 
 function normalizarFecha(fechaStr) {
@@ -219,27 +219,32 @@ function procesarUnArchivo(archivo, ss, PROCESADOS_ID, REVISAR_ID) {
       datos = extraerConGemini(blob, mime); fuenteDatos = 'Gemini';
       if (Array.isArray(datos) && datos.length > 0) datos = datos[0];
       if (datos && datos.es_factura_boleta === false) throw new Error('No es factura');
-      if (!datos.base || datos.base === null) alertas.push('Base no visible');
-      if (!datos.igv || datos.igv === null) alertas.push('IGV no visible');
     }
   } else { throw new Error('Formato no soportado'); }
+
+  // Filtro de seguridad anti-errores de IA
+  if (datos.nro_factura && String(datos.nro_factura).includes('{{')) datos.nro_factura = '';
+  if (datos.nro_boleta && String(datos.nro_boleta).includes('{{')) datos.nro_boleta = '';
+  if (datos.fecha_emision && String(datos.fecha_emision).includes('{{')) datos.fecha_emision = '';
+  if (datos.moneda && String(datos.moneda).includes('{{')) datos.moneda = 'PEN';
+
+  if (!datos.base || datos.base === null) alertas.push('Base no visible');
+  if (!datos.igv || datos.igv === null) alertas.push('IGV no visible');
 
   datos.fecha_emision = normalizarFecha(datos.fecha_emision);
   if (datos.ruc && datos.ruc.length !== 11) alertas.push('RUC inválido');
   if (datos.ruc && !datos.proveedor) datos.proveedor = obtenerRazonSocial(datos.ruc) || '';
 
-  // AQUI LLAMAMOS A LA NUEVA FUNCION QUE ORGANIZA TODO
   const ruta = archivarYConvertir(archivo, blob, nombre, datos.fecha_emision, PROCESADOS_ID);
   
   escribirExcel(idOriginal, datos, ruta, `Procesado (${fuenteDatos})`, alertas, ss);
-  // OJO: Ya no hay "archivo.moveTo(PROCESADOS_ID)" aquí porque la función de arriba ya lo hizo.
 }
 
 function extraerConGemini(blob, mime) {
   const key = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
   if(!key) throw new Error("Falta configurar Gemini API Key.");
   const b64 = Utilities.base64Encode(blob.getBytes());
-  const payload = { contents: [{ parts: [ { text: "Extrae JSON: tipo_comprobante, nro_factura, nro_boleta, proveedor, ruc, fecha_emision, base, igv, total, moneda, confianza. Si falta base/igv usa null." }, { inline_data: { mime_type: mime.includes('pdf')?'application/pdf':'image/jpeg', data: b64 } } ] }], generationConfig: { response_mime_type: 'application/json' } };
+  const payload = { contents: [{ parts: [ { text: "Extrae JSON: tipo_comprobante, nro_factura, nro_boleta, proveedor, ruc, fecha_emision, base, igv, total, moneda, confianza. Si falta base/igv usa null. Si no es factura, es_factura_boleta: false." }, { inline_data: { mime_type: mime.includes('pdf')?'application/pdf':'image/jpeg', data: b64 } } ] }], generationConfig: { response_mime_type: 'application/json' } };
   const modelos = [CONFIG.MODELO_PRIMARIO, CONFIG.MODELO_FALLBACK];
   let err = null;
   for (const mod of modelos) {
@@ -290,7 +295,6 @@ function convertirHeicAJpeg(archivo) {
   let blobJpeg = response.getBlob(); return blobJpeg;
 }
 
-// 6. NUEVA FUNCIÓN DE ARCHIVADO (Mueve o convierte, y crea el PDF)
 function archivarYConvertir(archivo, blob, nombre, fechaStr, PROCESADOS_ID) {
   let f = new Date(); 
   if (fechaStr && /^\d{2}-\d{2}-\d{4}$/.test(fechaStr)) { const p = fechaStr.split('-'); f = new Date(`${p[2]}-${p[1]}-${p[0]}`); }
@@ -305,36 +309,23 @@ function archivarYConvertir(archivo, blob, nombre, fechaStr, PROCESADOS_ID) {
   const ext = nombre.split('.').pop().toLowerCase();
   let finalUrl = '';
 
-  // 1. Guardar archivo (Mover original o guardar JPG si era HEIC)
   if (ext === 'heic' || ext === 'heif') {
-    blob.setName(nombre); // Ya tiene extensión .jpg
+    blob.setName(nombre); 
     const newFile = cM.createFile(blob);
     finalUrl = newFile.getUrl();
-    archivo.setTrashed(true); // Eliminamos el HEIC original para no duplicar
+    archivo.setTrashed(true); 
   } else {
-    archivo.moveTo(cM); // Movemos el archivo original (PDF, JPG, XML)
+    archivo.moveTo(cM); 
     finalUrl = archivo.getUrl();
   }
 
-  // 2. Si es una imagen, generamos el PDF
   if (mime.includes('image') || ext === 'heic' || ext === 'heif') {
     try {
-      const tempDoc = DocumentApp.create('Temp_Conv_' + archivo.getId());
-      const body = tempDoc.getBody();
-      body.setMarginTop(0).setMarginBottom(0).setMarginLeft(0).setMarginRight(0);
-      const img = body.appendImage(blob);
-      if (img.getWidth() > 600) {
-        const ratio = 600 / img.getWidth();
-        img.setWidth(600).setHeight(img.getHeight() * ratio);
-      }
-      tempDoc.saveAndClose();
-      const tempFile = DriveApp.getFileById(tempDoc.getId());
-      const pdfBlob = tempFile.getAs(MimeType.PDF);
+      const pdfBlob = blob.getAs(MimeType.PDF); 
       pdfBlob.setName(nombre.replace(/\.[^/.]+$/, "") + ".pdf");
       cM.createFile(pdfBlob);
-      tempFile.setTrashed(true);
     } catch (e) {
-      Logger.log('⚠️ No se pudo crear el PDF desde la imagen: ' + e.message);
+      Logger.log('⚠️ No se pudo crear el PDF: ' + e.message);
     }
   }
   
@@ -347,7 +338,9 @@ function escribirExcel(id, datos, ruta, estado, alertas, ss) {
   if (alertas.length > 0) obs += ' ⚠️ ' + alertas.join('. ');
   
   const fila = sheet.getLastRow() + 1;
-  const fechaProcesoStr = Utilities.formatDate(new Date(), "America/Lima", "dd-MM-yyyy");
+  
+  // AQUI SE AGREGO LA HORA AL FORMATO (dd-MM-yyyy HH:mm:ss)
+  const fechaProcesoStr = Utilities.formatDate(new Date(), "America/Lima", "dd-MM-yyyy HH:mm:ss");
   
   sheet.getRange(fila, 1, 1, 13).setValues([[
     datos.nro_factura || '', datos.nro_boleta || '', datos.proveedor || '', datos.ruc || '', 
@@ -369,7 +362,10 @@ function moverARevisar(archivo, motivo, ss, REVISAR_ID) {
   const sheet = ss.getSheetByName('Registro_Facturas');
   if (sheet) {
     const fila = sheet.getLastRow() + 1;
-    const fechaProcesoStr = Utilities.formatDate(new Date(), "America/Lima", "dd-MM-yyyy");
+    
+    // AQUI TAMBIEN SE AGREGO LA HORA PARA LOS RECHAZADOS
+    const fechaProcesoStr = Utilities.formatDate(new Date(), "America/Lima", "dd-MM-yyyy HH:mm:ss");
+    
     sheet.getRange(fila, 1, 1, 13).setValues([['', '', '', '', '', '', '', '', '', '', 'Revisar: ' + motivo, archivo.getId(), fechaProcesoStr]]);
     sheet.getRange(fila, 1, 1, 13).setBackground('#F4CCCC'); 
   }
